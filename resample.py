@@ -66,6 +66,7 @@ def resample(
         output_path = output_dir / relative_path.with_suffix(".wav")
         output_path.parent.mkdir(parents=True, exist_ok=True)
         soundfile.write(output_path, wav, sr)
+        print(f"Converted: {file.name}", flush=True)
     except Exception as e:
         logger.warning(f"Cannot load file, so skipping: {file}, {e}")
 
