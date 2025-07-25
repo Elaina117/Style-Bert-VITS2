@@ -36,6 +36,106 @@ from style_bert_vits2.models.models_jp_extra import (
 from style_bert_vits2.nlp.symbols import SYMBOLS
 from style_bert_vits2.utils.stdout_wrapper import SAFE_STDOUT
 
+# <<< START: ここからが追加するコード (Google Drive完全削除機能) >>>
+from pathlib import Path
+import re
+import googleapiclient.errors
+
+# グローバル変数としてdrive_serviceを定義
+# ノートブックの別セルで作成したものが使われます
+try:
+    drive_service
+except NameError:
+    drive_service = None
+
+def get_drive_file_id(service, file_path):
+    """ 指定されたフルパスからGoogle DriveのFile IDを取得する """
+    if not service:
+        logger.error("Drive service is not initialized. Please run the authentication cell.")
+        return None
+
+    path_parts = str(file_path).replace('/content/drive/MyDrive/', '').split('/')
+    parent_id = 'root'
+    
+    # メモ化のためのキャッシュ
+    if not hasattr(get_drive_file_id, "cache"):
+        get_drive_file_id.cache = {}
+
+    current_path = ""
+    for part in path_parts:
+        current_path = os.path.join(current_path, part)
+        if current_path in get_drive_file_id.cache:
+            file_id = get_drive_file_id.cache[current_path]
+        else:
+            try:
+                query = f"'{parent_id}' in parents and name = '{part}' and trashed = false"
+                results = service.files().list(q=query, fields="files(id, name)").execute()
+                items = results.get('files', [])
+                if not items:
+                    return None
+                file_id = items[0]['id']
+                get_drive_file_id.cache[current_path] = file_id
+            except googleapiclient.errors.HttpError as e:
+                logger.error(f"Failed to query Drive API for path '{current_path}': {e}")
+                return None
+        
+        parent_id = file_id
+
+    return parent_id
+
+
+def permanently_delete_drive_checkpoints(model_dir_path_str: str, n_ckpts_to_keep: int):
+    """
+    Google Drive上の古いチェックポイントをゴミ箱に入れずに完全に削除する
+    """
+    global drive_service
+    if drive_service is None:
+        logger.warning("Drive service not available. Skipping permanent deletion.")
+        return
+
+    logger.info(f"Permanently deleting old checkpoints in {model_dir_path_str}...")
+    
+    model_dir = Path(model_dir_path_str)
+    # G_xxxx.pth, D_xxxx.pth などのチェックポイントファイルを取得
+    ckpts = list(model_dir.glob("G_*.pth")) + list(model_dir.glob("D_*.pth"))
+    if list(model_dir.glob("DUR_*.pth")):
+        ckpts += list(model_dir.glob("DUR_*.pth"))
+    if list(model_dir.glob("WD_*.pth")):
+        ckpts += list(model_dir.glob("WD_*.pth"))
+    
+    # GとDのペアなので*2を目安にするが、多少ずれても大丈夫なようにする
+    if len(ckpts) <= n_ckpts_to_keep * 2: 
+        logger.info("No old checkpoints to delete.")
+        return
+
+    # ステップ番号でソート
+    ckpts.sort(key=lambda f: int(re.search(r'_(\d+)\.pth$', f.name).group(1)))
+
+    # 削除対象のファイルを決定 (最新のn個*関連ファイル数 を残すイメージ)
+    # ここでは単純に古いものから削除
+    num_to_delete = len(ckpts) - (n_ckpts_to_keep * len(list(set(p.name.split('_')[0] for p in ckpts))))
+    if num_to_delete <= 0:
+        logger.info("No old checkpoints to delete.")
+        return
+
+    files_to_delete = ckpts[:num_to_delete]
+
+    deleted_count = 0
+    for file_path in files_to_delete:
+        file_id = get_drive_file_id(drive_service, file_path)
+        if file_id:
+            try:
+                drive_service.files().delete(fileId=file_id).execute()
+                logger.info(f"Permanently deleted: {file_path.name}")
+                deleted_count += 1
+            except Exception as e:
+                logger.error(f"Failed to permanently delete {file_path.name}: {e}")
+        else:
+            logger.warning(f"Could not find File ID for {file_path.name}. Skipping deletion.")
+            
+    logger.info(f"Permanently deleted {deleted_count} old checkpoint files.")
+
+# <<< END: 追加コードはここまで >>>
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = (
@@ -986,13 +1086,27 @@ def train_and_evaluate(
                         epoch,
                         os.path.join(hps.model_dir, f"WD_{global_step}.pth"),
                     )
+                    
+                # <<< START: ここからが変更箇所 >>>
                 keep_ckpts = config.train_ms_config.keep_ckpts
                 if keep_ckpts > 0:
-                    utils.checkpoints.clean_checkpoints(
-                        model_dir_path=hps.model_dir,
-                        n_ckpts_to_keep=keep_ckpts,
-                        sort_by_time=True,
-                    )
+                    try:
+                        # Google Drive上での実行かを簡易的に判定
+                        if "drive/MyDrive" in hps.model_dir:
+                            permanently_delete_drive_checkpoints(
+                                model_dir_path_str=hps.model_dir,
+                                n_ckpts_to_keep=keep_ckpts,
+                            )
+                        else: # ローカル環境などでは元の方法で削除
+                            utils.checkpoints.clean_checkpoints(
+                                model_dir_path=hps.model_dir,
+                                n_ckpts_to_keep=keep_ckpts,
+                                sort_by_time=True,
+                            )
+                    except Exception as e:
+                        logger.error(f"An error occurred during checkpoint deletion: {e}")
+                # <<< END: 変更箇所はここまで >>>
+                
                 # Save safetensors (for inference) to `model_assets/{model_name}`
                 utils.safetensors.save_safetensors(
                     net_g,
