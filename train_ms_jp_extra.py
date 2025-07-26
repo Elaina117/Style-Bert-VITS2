@@ -278,6 +278,7 @@ def run():
             api.upload_file(
                 path_or_fileobj=args.config,
                 path_in_repo=f"Data/{config.model_name}/config.json",
+                repo_type="dataset",
                 repo_id=hps.repo_id,
             )
         except Exception as e:
@@ -289,10 +290,11 @@ def run():
         # Upload Data dir for resuming training
         api.upload_folder(
             repo_id=hps.repo_id,
+            repo_type="dataset",
             folder_path=config.dataset_path,
             path_in_repo=f"Data/{config.model_name}",
             delete_patterns="*.pth",  # Only keep the latest checkpoint
-            ignore_patterns=f"{config.dataset_path}/raw",  # Ignore raw data
+            ignore_patterns=f"{config.dataset_path}/wav",  # Ignore raw data
             run_as_future=True,
         )
     os.makedirs(config.out_dir, exist_ok=True)
@@ -739,6 +741,7 @@ def run():
             if hps.repo_id is not None:
                 future1 = api.upload_folder(
                     repo_id=hps.repo_id,
+                    repo_type="dataset",
                     folder_path=config.dataset_path,
                     path_in_repo=f"Data/{config.model_name}",
                     delete_patterns="*.pth",  # Only keep the latest checkpoint
@@ -747,6 +750,7 @@ def run():
                 )
                 future2 = api.upload_folder(
                     repo_id=hps.repo_id,
+                    repo_type="dataset",
                     folder_path=config.out_dir,
                     path_in_repo=f"model_assets/{config.model_name}",
                     run_as_future=True,
@@ -1122,12 +1126,14 @@ def train_and_evaluate(
                         repo_id=hps.repo_id,
                         folder_path=config.dataset_path,
                         path_in_repo=f"Data/{config.model_name}",
+                        repo_type="dataset",
                         delete_patterns="*.pth",  # Only keep the latest checkpoint
                         ignore_patterns=f"{config.dataset_path}/raw",  # Ignore raw data
                         run_as_future=True,
                     )
                     api.upload_folder(
                         repo_id=hps.repo_id,
+                        repo_type="dataset",
                         folder_path=config.out_dir,
                         path_in_repo=f"model_assets/{config.model_name}",
                         run_as_future=True,
