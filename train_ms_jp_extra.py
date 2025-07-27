@@ -36,106 +36,6 @@ from style_bert_vits2.models.models_jp_extra import (
 from style_bert_vits2.nlp.symbols import SYMBOLS
 from style_bert_vits2.utils.stdout_wrapper import SAFE_STDOUT
 
-# <<< START: ここからが追加するコード (Google Drive完全削除機能) >>>
-from pathlib import Path
-import re
-import googleapiclient.errors
-
-# グローバル変数としてdrive_serviceを定義
-# ノートブックの別セルで作成したものが使われます
-try:
-    drive_service
-except NameError:
-    drive_service = None
-
-def get_drive_file_id(service, file_path):
-    """ 指定されたフルパスからGoogle DriveのFile IDを取得する """
-    if not service:
-        logger.error("Drive service is not initialized. Please run the authentication cell.")
-        return None
-
-    path_parts = str(file_path).replace('/content/drive/MyDrive/', '').split('/')
-    parent_id = 'root'
-    
-    # メモ化のためのキャッシュ
-    if not hasattr(get_drive_file_id, "cache"):
-        get_drive_file_id.cache = {}
-
-    current_path = ""
-    for part in path_parts:
-        current_path = os.path.join(current_path, part)
-        if current_path in get_drive_file_id.cache:
-            file_id = get_drive_file_id.cache[current_path]
-        else:
-            try:
-                query = f"'{parent_id}' in parents and name = '{part}' and trashed = false"
-                results = service.files().list(q=query, fields="files(id, name)").execute()
-                items = results.get('files', [])
-                if not items:
-                    return None
-                file_id = items[0]['id']
-                get_drive_file_id.cache[current_path] = file_id
-            except googleapiclient.errors.HttpError as e:
-                logger.error(f"Failed to query Drive API for path '{current_path}': {e}")
-                return None
-        
-        parent_id = file_id
-
-    return parent_id
-
-
-def permanently_delete_drive_checkpoints(model_dir_path_str: str, n_ckpts_to_keep: int):
-    """
-    Google Drive上の古いチェックポイントをゴミ箱に入れずに完全に削除する
-    """
-    global drive_service
-    if drive_service is None:
-        logger.warning("Drive service not available. Skipping permanent deletion.")
-        return
-
-    logger.info(f"Permanently deleting old checkpoints in {model_dir_path_str}...")
-    
-    model_dir = Path(model_dir_path_str)
-    # G_xxxx.pth, D_xxxx.pth などのチェックポイントファイルを取得
-    ckpts = list(model_dir.glob("G_*.pth")) + list(model_dir.glob("D_*.pth"))
-    if list(model_dir.glob("DUR_*.pth")):
-        ckpts += list(model_dir.glob("DUR_*.pth"))
-    if list(model_dir.glob("WD_*.pth")):
-        ckpts += list(model_dir.glob("WD_*.pth"))
-    
-    # GとDのペアなので*2を目安にするが、多少ずれても大丈夫なようにする
-    if len(ckpts) <= n_ckpts_to_keep * 2: 
-        logger.info("No old checkpoints to delete.")
-        return
-
-    # ステップ番号でソート
-    ckpts.sort(key=lambda f: int(re.search(r'_(\d+)\.pth$', f.name).group(1)))
-
-    # 削除対象のファイルを決定 (最新のn個*関連ファイル数 を残すイメージ)
-    # ここでは単純に古いものから削除
-    num_to_delete = len(ckpts) - (n_ckpts_to_keep * len(list(set(p.name.split('_')[0] for p in ckpts))))
-    if num_to_delete <= 0:
-        logger.info("No old checkpoints to delete.")
-        return
-
-    files_to_delete = ckpts[:num_to_delete]
-
-    deleted_count = 0
-    for file_path in files_to_delete:
-        file_id = get_drive_file_id(drive_service, file_path)
-        if file_id:
-            try:
-                drive_service.files().delete(fileId=file_id).execute()
-                logger.info(f"Permanently deleted: {file_path.name}")
-                deleted_count += 1
-            except Exception as e:
-                logger.error(f"Failed to permanently delete {file_path.name}: {e}")
-        else:
-            logger.warning(f"Could not find File ID for {file_path.name}. Skipping deletion.")
-            
-    logger.info(f"Permanently deleted {deleted_count} old checkpoint files.")
-
-# <<< END: 追加コードはここまで >>>
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = (
@@ -272,31 +172,32 @@ def run():
         default: `model_assets/{model_name}`.
     """
 
-    if args.repo_id is not None:
-        # First try to upload config.json to check if the repo exists
+    if hps.repo_id is not None:
         try:
+            # Create a private repository if it doesn't exist.
+            # This will use the token from `huggingface-cli login`.
+            repo_url = api.create_repo(
+                repo_id=hps.repo_id,
+                repo_type="model",
+                private=True,
+                exist_ok=True,
+            )
+            logger.info(f"Private repository '{hps.repo_id}' ensured. URL: {repo_url}")
+
+            # Upload the config file.
             api.upload_file(
                 path_or_fileobj=args.config,
                 path_in_repo=f"Data/{config.model_name}/config.json",
-                repo_type="dataset",
                 repo_id=hps.repo_id,
             )
         except Exception as e:
             logger.error(e)
             logger.error(
-                f"Failed to upload files to the repo {hps.repo_id}. Please check if the repo exists and you have logged in using `huggingface-cli login`."
+                f"Failed to create or upload to the repo '{hps.repo_id}'. "
+                "Please check if you have write permissions and have logged in using `huggingface-cli login`."
             )
             raise e
-        # Upload Data dir for resuming training
-        api.upload_folder(
-            repo_id=hps.repo_id,
-            repo_type="dataset",
-            folder_path=config.dataset_path,
-            path_in_repo=f"Data/{config.model_name}",
-            delete_patterns="*.pth",  # Only keep the latest checkpoint
-            ignore_patterns=f"{config.dataset_path}/wavs",  # Ignore raw data
-            run_as_future=True,
-        )
+
     os.makedirs(config.out_dir, exist_ok=True)
 
     if not args.skip_default_style:
@@ -739,25 +640,65 @@ def run():
                 for_infer=True,
             )
             if hps.repo_id is not None:
-                future1 = api.upload_folder(
-                    repo_id=hps.repo_id,
-                    repo_type="dataset",
-                    folder_path=config.dataset_path,
-                    path_in_repo=f"Data/{config.model_name}",
-                    delete_patterns="*.pth",  # Only keep the latest checkpoint
-                    ignore_patterns=f"{config.dataset_path}/raw",  # Ignore raw data
-                    run_as_future=True,
+                futures = []
+                # Upload .pth files
+                g_pth_path = os.path.join(model_dir, f"G_{global_step}.pth")
+                d_pth_path = os.path.join(model_dir, f"D_{global_step}.pth")
+                futures.append(
+                    api.upload_file(
+                        path_or_fileobj=g_pth_path,
+                        path_in_repo=f"Data/{config.model_name}/models/{os.path.basename(g_pth_path)}",
+                        repo_id=hps.repo_id,
+                        run_as_future=True,
+                    )
                 )
-                future2 = api.upload_folder(
-                    repo_id=hps.repo_id,
-                    repo_type="dataset",
-                    folder_path=config.out_dir,
-                    path_in_repo=f"model_assets/{config.model_name}",
-                    run_as_future=True,
+                futures.append(
+                    api.upload_file(
+                        path_or_fileobj=d_pth_path,
+                        path_in_repo=f"Data/{config.model_name}/models/{os.path.basename(d_pth_path)}",
+                        repo_id=hps.repo_id,
+                        run_as_future=True,
+                    )
                 )
+                if net_dur_disc is not None:
+                    dur_pth_path = os.path.join(
+                        model_dir, f"DUR_{global_step}.pth"
+                    )
+                    futures.append(
+                        api.upload_file(
+                            path_or_fileobj=dur_pth_path,
+                            path_in_repo=f"Data/{config.model_name}/models/{os.path.basename(dur_pth_path)}",
+                            repo_id=hps.repo_id,
+                            run_as_future=True,
+                        )
+                    )
+                if net_wd is not None:
+                    wd_pth_path = os.path.join(model_dir, f"WD_{global_step}.pth")
+                    futures.append(
+                        api.upload_file(
+                            path_or_fileobj=wd_pth_path,
+                            path_in_repo=f"Data/{config.model_name}/models/{os.path.basename(wd_pth_path)}",
+                            repo_id=hps.repo_id,
+                            run_as_future=True,
+                        )
+                    )
+                # Upload .safetensors file
+                safetensors_path = os.path.join(
+                    config.out_dir,
+                    f"{config.model_name}_e{epoch}_s{global_step}.safetensors",
+                )
+                futures.append(
+                    api.upload_file(
+                        path_or_fileobj=safetensors_path,
+                        path_in_repo=f"model_assets/{config.model_name}/{os.path.basename(safetensors_path)}",
+                        repo_id=hps.repo_id,
+                        run_as_future=True,
+                    )
+                )
+
                 try:
-                    future1.result()
-                    future2.result()
+                    for future in futures:
+                        future.result()
                 except Exception as e:
                     logger.error(e)
 
@@ -1090,27 +1031,13 @@ def train_and_evaluate(
                         epoch,
                         os.path.join(hps.model_dir, f"WD_{global_step}.pth"),
                     )
-                    
-                # <<< START: ここからが変更箇所 >>>
                 keep_ckpts = config.train_ms_config.keep_ckpts
                 if keep_ckpts > 0:
-                    try:
-                        # Google Drive上での実行かを簡易的に判定
-                        if "drive/MyDrive" in hps.model_dir:
-                            permanently_delete_drive_checkpoints(
-                                model_dir_path_str=hps.model_dir,
-                                n_ckpts_to_keep=keep_ckpts,
-                            )
-                        else: # ローカル環境などでは元の方法で削除
-                            utils.checkpoints.clean_checkpoints(
-                                model_dir_path=hps.model_dir,
-                                n_ckpts_to_keep=keep_ckpts,
-                                sort_by_time=True,
-                            )
-                    except Exception as e:
-                        logger.error(f"An error occurred during checkpoint deletion: {e}")
-                # <<< END: 変更箇所はここまで >>>
-                
+                    utils.checkpoints.clean_checkpoints(
+                        model_dir_path=hps.model_dir,
+                        n_ckpts_to_keep=keep_ckpts,
+                        sort_by_time=True,
+                    )
                 # Save safetensors (for inference) to `model_assets/{model_name}`
                 utils.safetensors.save_safetensors(
                     net_g,
@@ -1122,20 +1049,54 @@ def train_and_evaluate(
                     for_infer=True,
                 )
                 if hps.repo_id is not None:
-                    api.upload_folder(
+                    # Upload .pth files
+                    g_pth_path = os.path.join(
+                        hps.model_dir, f"G_{global_step}.pth"
+                    )
+                    d_pth_path = os.path.join(
+                        hps.model_dir, f"D_{global_step}.pth"
+                    )
+                    api.upload_file(
+                        path_or_fileobj=g_pth_path,
+                        path_in_repo=f"Data/{config.model_name}/models/{os.path.basename(g_pth_path)}",
                         repo_id=hps.repo_id,
-                        folder_path=config.dataset_path,
-                        path_in_repo=f"Data/{config.model_name}",
-                        repo_type="dataset",
-                        delete_patterns="*.pth",  # Only keep the latest checkpoint
-                        ignore_patterns=f"{config.dataset_path}/raw",  # Ignore raw data
                         run_as_future=True,
                     )
-                    api.upload_folder(
+                    api.upload_file(
+                        path_or_fileobj=d_pth_path,
+                        path_in_repo=f"Data/{config.model_name}/models/{os.path.basename(d_pth_path)}",
                         repo_id=hps.repo_id,
-                        repo_type="dataset",
-                        folder_path=config.out_dir,
-                        path_in_repo=f"model_assets/{config.model_name}",
+                        run_as_future=True,
+                    )
+                    if net_dur_disc is not None:
+                        dur_pth_path = os.path.join(
+                            hps.model_dir, f"DUR_{global_step}.pth"
+                        )
+                        api.upload_file(
+                            path_or_fileobj=dur_pth_path,
+                            path_in_repo=f"Data/{config.model_name}/models/{os.path.basename(dur_pth_path)}",
+                            repo_id=hps.repo_id,
+                            run_as_future=True,
+                        )
+                    if net_wd is not None:
+                        wd_pth_path = os.path.join(
+                            hps.model_dir, f"WD_{global_step}.pth"
+                        )
+                        api.upload_file(
+                            path_or_fileobj=wd_pth_path,
+                            path_in_repo=f"Data/{config.model_name}/models/{os.path.basename(wd_pth_path)}",
+                            repo_id=hps.repo_id,
+                            run_as_future=True,
+                        )
+                    # Upload .safetensors file
+                    safetensors_path = os.path.join(
+                        config.out_dir,
+                        f"{config.model_name}_e{epoch}_s{global_step}.safetensors",
+                    )
+                    api.upload_file(
+                        path_or_fileobj=safetensors_path,
+                        path_in_repo=f"model_assets/{config.model_name}/{os.path.basename(safetensors_path)}",
+                        repo_id=hps.repo_id,
                         run_as_future=True,
                     )
 
