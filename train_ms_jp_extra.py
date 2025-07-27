@@ -294,7 +294,7 @@ def run():
             folder_path=config.dataset_path,
             path_in_repo=f"Data/{config.model_name}",
             delete_patterns="*.pth",  # Only keep the latest checkpoint
-            ignore_patterns=f"{config.dataset_path}/wav",  # Ignore raw data
+            ignore_patterns=f"{config.dataset_path}/wavs",  # Ignore raw data
             run_as_future=True,
         )
     os.makedirs(config.out_dir, exist_ok=True)
