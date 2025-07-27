@@ -1,8 +1,11 @@
 import argparse
 import datetime
 import gc
+import glob
+import logging
 import os
 import platform
+from concurrent.futures import as_completed
 
 import torch
 import torch.distributed as dist
@@ -55,7 +58,133 @@ global_step = 0
 api = HfApi()
 
 
+def clean_huggingface_checkpoints(repo_id, model_name, n_ckpts_to_keep, api, logger):
+    """Deletes old checkpoints from a Hugging Face Hub repository."""
+    if n_ckpts_to_keep <= 0:
+        return
+    if logger:
+        logger.info(
+            f"Cleaning old checkpoints from Hugging Face Hub, keeping last {n_ckpts_to_keep}..."
+        )
+
+    try:
+        repo_files = api.list_repo_files(repo_id=repo_id, repo_type="model")
+
+        # --- Clean .pth files ---
+        pth_dir = f"Data/{model_name}/models/"
+        pth_files = [f for f in repo_files if f.startswith(pth_dir) and f.endswith(".pth")]
+
+        pth_groups = {}
+        for f in pth_files:
+            try:
+                prefix = os.path.basename(f).split("_")[0]
+                if prefix not in pth_groups:
+                    pth_groups[prefix] = []
+                pth_groups[prefix].append(f)
+            except IndexError:
+                continue  # Skip files that don't match the format
+
+        files_to_delete = []
+        for prefix, files in pth_groups.items():
+            if len(files) > n_ckpts_to_keep:
+                sorted_files = sorted(
+                    files,
+                    key=lambda x: int(
+                        os.path.basename(x).split("_")[-1].split(".")[0]
+                    ),
+                    reverse=True,
+                )
+                files_to_delete.extend(sorted_files[n_ckpts_to_keep:])
+
+        # --- Clean .safetensors files ---
+        sf_dir = f"model_assets/{model_name}/"
+        sf_files = [
+            f
+            for f in repo_files
+            if f.startswith(sf_dir) and f.endswith(".safetensors")
+        ]
+
+        if len(sf_files) > n_ckpts_to_keep:
+            sorted_sf_files = sorted(
+                sf_files,
+                key=lambda x: int(os.path.basename(x).split("_s")[-1].split(".")[0]),
+                reverse=True,
+            )
+            files_to_delete.extend(sorted_sf_files[n_ckpts_to_keep:])
+
+        if not files_to_delete:
+            if logger:
+                logger.info("No old checkpoints to clean on Hugging Face Hub.")
+            return
+
+        if logger:
+            logger.info(
+                f"Deleting {len(files_to_delete)} old checkpoints from Hugging Face Hub..."
+            )
+        
+        # --- DELETION LOGIC (MODIFIED) ---
+        # Use a loop with `delete_file` for better compatibility with older huggingface-hub versions.
+        for file_path in files_to_delete:
+            try:
+                if logger:
+                    logger.info(f"Deleting {file_path} from Hub...")
+                api.delete_file(repo_id=repo_id, path_in_repo=file_path)
+            except Exception as e:
+                if logger:
+                    logger.warning(f"Could not delete file {file_path}: {e}")
+        # --- END OF MODIFICATION ---
+
+        if logger:
+            logger.info("Hugging Face Hub cleanup complete.")
+
+    except Exception as e:
+        if logger:
+            logger.error(f"Failed to clean up checkpoints from Hugging Face Hub: {e}")
+
+def clean_local_safetensors(directory, model_name, n_to_keep, logger):
+    """Deletes old local .safetensors files, keeping the most recent ones."""
+    if n_to_keep <= 0:
+        return
+    
+    try:
+        # Construct the file pattern to find the correct safetensors files
+        pattern = os.path.join(directory, f"{model_name}_e*_s*.safetensors")
+        files = glob.glob(pattern)
+        
+        if len(files) <= n_to_keep:
+            if logger:
+                logger.info(f"Found {len(files)} local .safetensors files, which is not more than {n_to_keep}. No cleanup needed.")
+            return
+
+        # Sort files by step number (s{number}) in descending order (newest first)
+        sorted_files = sorted(
+            files,
+            key=lambda x: int(os.path.basename(x).split('_s')[-1].split('.')[0]),
+            reverse=True
+        )
+
+        files_to_delete = sorted_files[n_to_keep:]
+        
+        if logger:
+            logger.info(f"Cleaning old local .safetensors files. Found {len(files)}, keeping {n_to_keep}, deleting {len(files_to_delete)}.")
+
+        for f_path in files_to_delete:
+            try:
+                os.remove(f_path)
+                if logger:
+                    logger.info(f"Deleted local file: {f_path}")
+            except OSError as e:
+                if logger:
+                    logger.error(f"Error deleting file {f_path}: {e}")
+
+    except Exception as e:
+        if logger:
+            logger.error(f"Failed to clean up local .safetensors files: {e}")
+
 def run():
+    # To prevent huggingface_hub's log from interfering with our own tqdm.
+    logging.getLogger("huggingface_hub").setLevel(logging.WARNING)
+
     # Command line configuration is not recommended unless necessary, use config.yml
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -697,8 +826,28 @@ def run():
                 )
 
                 try:
-                    for future in futures:
+                    logger.info("Waiting for final checkpoint uploads to complete...")
+                    for future in as_completed(futures):
                         future.result()
+                    logger.info("Final checkpoint uploads completed.")
+
+                    # Clean up old checkpoints on Hugging Face Hub
+                    keep_ckpts = config.train_ms_config.keep_ckpts
+                    if keep_ckpts > 0:
+                        clean_huggingface_checkpoints(
+                            repo_id=hps.repo_id,
+                            model_name=config.model_name,
+                            n_ckpts_to_keep=keep_ckpts,
+                            api=api,
+                            logger=logger,
+                        )
+                    if keep_ckpts > 0:
+                        clean_local_safetensors(
+                            directory=config.out_dir,
+                            model_name=config.model_name,
+                            n_to_keep=keep_ckpts,
+                            logger=logger,
+                        )
                 except Exception as e:
                     logger.error(e)
 
@@ -1049,56 +1198,88 @@ def train_and_evaluate(
                     for_infer=True,
                 )
                 if hps.repo_id is not None:
+                    futures = []
                     # Upload .pth files
-                    g_pth_path = os.path.join(
-                        hps.model_dir, f"G_{global_step}.pth"
+                    g_pth_path = os.path.join(hps.model_dir, f"G_{global_step}.pth")
+                    d_pth_path = os.path.join(hps.model_dir, f"D_{global_step}.pth")
+                    futures.append(
+                        api.upload_file(
+                            path_or_fileobj=g_pth_path,
+                            path_in_repo=f"Data/{config.model_name}/models/{os.path.basename(g_pth_path)}",
+                            repo_id=hps.repo_id,
+                            run_as_future=True,
+                        )
                     )
-                    d_pth_path = os.path.join(
-                        hps.model_dir, f"D_{global_step}.pth"
-                    )
-                    api.upload_file(
-                        path_or_fileobj=g_pth_path,
-                        path_in_repo=f"Data/{config.model_name}/models/{os.path.basename(g_pth_path)}",
-                        repo_id=hps.repo_id,
-                        run_as_future=True,
-                    )
-                    api.upload_file(
-                        path_or_fileobj=d_pth_path,
-                        path_in_repo=f"Data/{config.model_name}/models/{os.path.basename(d_pth_path)}",
-                        repo_id=hps.repo_id,
-                        run_as_future=True,
+                    futures.append(
+                        api.upload_file(
+                            path_or_fileobj=d_pth_path,
+                            path_in_repo=f"Data/{config.model_name}/models/{os.path.basename(d_pth_path)}",
+                            repo_id=hps.repo_id,
+                            run_as_future=True,
+                        )
                     )
                     if net_dur_disc is not None:
                         dur_pth_path = os.path.join(
                             hps.model_dir, f"DUR_{global_step}.pth"
                         )
-                        api.upload_file(
-                            path_or_fileobj=dur_pth_path,
-                            path_in_repo=f"Data/{config.model_name}/models/{os.path.basename(dur_pth_path)}",
-                            repo_id=hps.repo_id,
-                            run_as_future=True,
+                        futures.append(
+                            api.upload_file(
+                                path_or_fileobj=dur_pth_path,
+                                path_in_repo=f"Data/{config.model_name}/models/{os.path.basename(dur_pth_path)}",
+                                repo_id=hps.repo_id,
+                                run_as_future=True,
+                            )
                         )
                     if net_wd is not None:
                         wd_pth_path = os.path.join(
                             hps.model_dir, f"WD_{global_step}.pth"
                         )
-                        api.upload_file(
-                            path_or_fileobj=wd_pth_path,
-                            path_in_repo=f"Data/{config.model_name}/models/{os.path.basename(wd_pth_path)}",
-                            repo_id=hps.repo_id,
-                            run_as_future=True,
+                        futures.append(
+                            api.upload_file(
+                                path_or_fileobj=wd_pth_path,
+                                path_in_repo=f"Data/{config.model_name}/models/{os.path.basename(wd_pth_path)}",
+                                repo_id=hps.repo_id,
+                                run_as_future=True,
+                            )
                         )
                     # Upload .safetensors file
                     safetensors_path = os.path.join(
                         config.out_dir,
                         f"{config.model_name}_e{epoch}_s{global_step}.safetensors",
                     )
-                    api.upload_file(
-                        path_or_fileobj=safetensors_path,
-                        path_in_repo=f"model_assets/{config.model_name}/{os.path.basename(safetensors_path)}",
-                        repo_id=hps.repo_id,
-                        run_as_future=True,
+                    futures.append(
+                        api.upload_file(
+                            path_or_fileobj=safetensors_path,
+                            path_in_repo=f"model_assets/{config.model_name}/{os.path.basename(safetensors_path)}",
+                            repo_id=hps.repo_id,
+                            run_as_future=True,
+                        )
                     )
+
+                    try:
+                        logger.info("Waiting for checkpoint uploads to complete...")
+                        for future in as_completed(futures):
+                            future.result()
+                        logger.info("Checkpoint uploads completed.")
+
+                        # Clean up old checkpoints on Hugging Face Hub
+                        if keep_ckpts > 0:
+                            clean_huggingface_checkpoints(
+                                repo_id=hps.repo_id,
+                                model_name=config.model_name,
+                                n_ckpts_to_keep=keep_ckpts,
+                                api=api,
+                                logger=logger,
+                            )
+                        if keep_ckpts > 0:
+                                clean_local_safetensors(
+                                directory=config.out_dir,
+                                model_name=config.model_name,
+                                n_to_keep=keep_ckpts,
+                                logger=logger,
+                            )
+                    except Exception as e:
+                        logger.error(f"An error occurred during file upload: {e}")
 
         global_step += 1
         if pbar is not None:
