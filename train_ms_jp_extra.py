@@ -64,7 +64,7 @@ def clean_huggingface_checkpoints(repo_id, model_name, n_ckpts_to_keep, api, log
         return
     if logger:
         logger.info(
-            f"Cleaning old checkpoints from Hugging Face Hub, keeping last {n_ckpts_to_keep}..."
+            f"Hugging Face Hubの古いチェックポイントを掃除します。最新の{n_ckpts_to_keep}個を保持します..."
         )
 
     try:
@@ -114,7 +114,7 @@ def clean_huggingface_checkpoints(repo_id, model_name, n_ckpts_to_keep, api, log
 
         if not files_to_delete:
             if logger:
-                logger.info("No old checkpoints to clean on Hugging Face Hub.")
+                logger.info("Hugging Face Hubに掃除する古いチェックポイントはありません。")
             return
 
         if logger:
@@ -127,19 +127,19 @@ def clean_huggingface_checkpoints(repo_id, model_name, n_ckpts_to_keep, api, log
         for file_path in files_to_delete:
             try:
                 if logger:
-                    logger.info(f"Deleting {file_path} from Hub...")
+                    logger.info(f"Hubから {file_path} を削除しています...")
                 api.delete_file(repo_id=repo_id, path_in_repo=file_path)
             except Exception as e:
                 if logger:
-                    logger.warning(f"Could not delete file {file_path}: {e}")
+                    logger.warning(f"ファイル {file_path} を削除できませんでした: {e}")
         # --- END OF MODIFICATION ---
 
         if logger:
-            logger.info("Hugging Face Hub cleanup complete.")
+            logger.info("Hugging Face Hubの掃除が完了しました。")
 
     except Exception as e:
         if logger:
-            logger.error(f"Failed to clean up checkpoints from Hugging Face Hub: {e}")
+            logger.error(f"Hugging Face Hubのチェックポイントの掃除に失敗しました: {e}")
 
 def clean_local_safetensors(directory, model_name, n_to_keep, logger):
     """Deletes old local .safetensors files, keeping the most recent ones."""
@@ -172,14 +172,14 @@ def clean_local_safetensors(directory, model_name, n_to_keep, logger):
             try:
                 os.remove(f_path)
                 if logger:
-                    logger.info(f"Deleted local file: {f_path}")
+                    logger.info(f"ローカルファイルを削除しました: {f_path}")
             except OSError as e:
                 if logger:
-                    logger.error(f"Error deleting file {f_path}: {e}")
+                    logger.error(f"ファイル {f_path} の削除中にエラーが発生しました: {e}")
 
     except Exception as e:
         if logger:
-            logger.error(f"Failed to clean up local .safetensors files: {e}")
+            logger.error(f"ローカルの.safetensorsファイルの掃除に失敗しました: {e}")
 
 def run():
     # To prevent huggingface_hub's log from interfering with our own tqdm.
@@ -243,15 +243,10 @@ def run():
     envs = config.train_ms_config.env
     for env_name, env_value in envs.items():
         if env_name not in os.environ.keys():
-            logger.info(f"Loading configuration from config {env_value!s}")
+            logger.info(f"設定ファイルから設定を読み込んでいます: {env_value!s}")
             os.environ[env_name] = str(env_value)
     logger.info(
-        "Loading environment variables \nMASTER_ADDR: {},\nMASTER_PORT: {},\nWORLD_SIZE: {},\nRANK: {},\nLOCAL_RANK: {}".format(
-            os.environ["MASTER_ADDR"],
-            os.environ["MASTER_PORT"],
-            os.environ["WORLD_SIZE"],
-            os.environ["RANK"],
-            os.environ["LOCAL_RANK"],
+        "Loading environment variables \nMASTER_ADDR: {},\nMASTER_PORT: {},\nWORLD_SIZE: {},\nRANK: {},\nLOCAL_RANK: {}".format(            os.environ["MASTER_ADDR"],            os.environ["MASTER_PORT"],            os.environ["WORLD_SIZE"],            os.environ["RANK"],            os.environ["LOCAL_RANK"],
         )
     )
 
@@ -311,7 +306,7 @@ def run():
                 private=True,
                 exist_ok=True,
             )
-            logger.info(f"Private repository '{hps.repo_id}' ensured. URL: {repo_url}")
+            logger.info(f"プライベートリポジトリ '{hps.repo_id}' を確認しました。URL: {repo_url}")
 
             # Upload the config file.
             api.upload_file(
@@ -322,8 +317,7 @@ def run():
         except Exception as e:
             logger.error(e)
             logger.error(
-                f"Failed to create or upload to the repo '{hps.repo_id}'. "
-                "Please check if you have write permissions and have logged in using `huggingface-cli login`."
+                f"Failed to create or upload to the repo '{hps.repo_id}'. "                "Please check if you have write permissions and have logged in using `huggingface-cli login`."
             )
             raise e
 
@@ -403,15 +397,15 @@ def run():
             collate_fn=collate_fn,
         )
     if hps.model.use_noise_scaled_mas is True:
-        logger.info("Using noise scaled MAS for VITS2")
+        logger.info("VITS2のノイズスケールMASを使用します")
         mas_noise_scale_initial = 0.01
         noise_scale_delta = 2e-6
     else:
-        logger.info("Using normal MAS for VITS1")
+        logger.info("VITS1の通常MASを使用します")
         mas_noise_scale_initial = 0.0
         noise_scale_delta = 0.0
     if hps.model.use_duration_discriminator is True:
-        logger.info("Using duration discriminator for VITS2")
+        logger.info("VITS2の継続時間判別器を使用します")
         net_dur_disc = DurationDiscriminator(
             hps.model.hidden_channels,
             hps.model.hidden_channels,
@@ -433,7 +427,7 @@ def run():
                 "n_speakers must be > 0 when using spk conditioned encoder to train multi-speaker model"
             )
     else:
-        logger.info("Using normal encoder for VITS1")
+        logger.info("VITS1の通常エンコーダを使用します")
 
     net_g = SynthesizerTrn(
         len(SYMBOLS),
@@ -471,12 +465,12 @@ def run():
         for param in net_g.enc_p.bert_proj.parameters():
             param.requires_grad = False
     if getattr(hps.train, "freeze_style", False):
-        logger.info("Freezing style encoder !!!")
+        logger.info("スタイルエンコーダを凍結します！")
         for param in net_g.enc_p.style_proj.parameters():
             param.requires_grad = False
 
     if getattr(hps.train, "freeze_decoder", False):
-        logger.info("Freezing decoder !!!")
+        logger.info("デコーダを凍結します！")
         for param in net_g.dec.parameters():
             param.requires_grad = False
 
@@ -550,7 +544,7 @@ def run():
             except:
                 if not optim_dur_disc.param_groups[0].get("initial_lr"):
                     optim_dur_disc.param_groups[0]["initial_lr"] = dur_resume_lr
-                print("Initialize dur_disc")
+                print("継続時間判別器を初期化します")
         if net_wd is not None:
             try:
                 _, optim_wd, wd_resume_lr, epoch_str = (
@@ -568,7 +562,7 @@ def run():
             except:
                 if not optim_wd.param_groups[0].get("initial_lr"):
                     optim_wd.param_groups[0]["initial_lr"] = wd_resume_lr
-                logger.info("Initialize wavlm")
+                logger.info("WavLMを初期化します")
 
         try:
             _, optim_g, g_resume_lr, epoch_str = utils.checkpoints.load_checkpoint(
@@ -596,12 +590,12 @@ def run():
                 )
             )
             logger.info(
-                f"******************Found the model. Current epoch is {epoch_str}, gloabl step is {global_step}*********************"
+                f"******************モデルを発見しました。現在のエポック: {epoch_str}, グローバルステップ: {global_step}*********************"
             )
         except Exception as e:
             logger.warning(e)
             logger.warning(
-                "It seems that you are not using the pretrained models, so we will train from scratch."
+                "事前学習済みモデルを使用していないようですので、最初から学習を開始します。"
             )
             epoch_str = 1
             global_step = 0
@@ -621,11 +615,11 @@ def run():
                 _ = utils.safetensors.load_safetensors(
                     os.path.join(model_dir, "WD_0.safetensors"), net_wd
                 )
-            logger.info("Loaded the pretrained models.")
+            logger.info("事前学習済みモデルを読み込みました。")
         except Exception as e:
             logger.warning(e)
             logger.warning(
-                "It seems that you are not using the pretrained models, so we will train from scratch."
+                "事前学習済みモデルを使用していないようですので、最初から学習を開始します。"
             )
         finally:
             epoch_str = 1
@@ -669,7 +663,7 @@ def run():
         scheduler_wd = None
         wl = None
     scaler = GradScaler(enabled=hps.train.bf16_run)
-    logger.info("Start training.")
+    logger.info("学習を開始します。")
 
     diff = abs(
         epoch_str * len(train_loader) - (hps.train.epochs + 1) * len(train_loader)
@@ -826,10 +820,10 @@ def run():
                 )
 
                 try:
-                    logger.info("Waiting for final checkpoint uploads to complete...")
+                    logger.info("最終チェックポイントのアップロード完了を待っています...")
                     for future in as_completed(futures):
                         future.result()
-                    logger.info("Final checkpoint uploads completed.")
+                    logger.info("最終チェックポイントのアップロードが完了しました。")
 
                     # Clean up old checkpoints on Hugging Face Hub
                     keep_ckpts = config.train_ms_config.keep_ckpts
@@ -1062,8 +1056,7 @@ def train_and_evaluate(
                 lr = optim_g.param_groups[0]["lr"]
                 losses = [loss_disc, loss_gen, loss_fm, loss_mel, loss_dur, loss_kl]
                 # logger.info(
-                #     "Train Epoch: {} [{:.0f}%]".format(
-                #         epoch, 100.0 * batch_idx / len(train_loader)
+                #     "Train Epoch: {} [{:.0f}%]".format(                #         epoch, 100.0 * batch_idx / len(train_loader)
                 #     )
                 # )
                 # logger.info([x.item() for x in losses] + [global_step, lr])
@@ -1257,10 +1250,10 @@ def train_and_evaluate(
                     )
 
                     try:
-                        logger.info("Waiting for checkpoint uploads to complete...")
+                        logger.info("チェックポイントのアップロード完了を待っています...")
                         for future in as_completed(futures):
                             future.result()
-                        logger.info("Checkpoint uploads completed.")
+                        logger.info("チェックポイントのアップロードが完了しました。")
 
                         # Clean up old checkpoints on Hugging Face Hub
                         if keep_ckpts > 0:
@@ -1279,7 +1272,7 @@ def train_and_evaluate(
                                 logger=logger,
                             )
                     except Exception as e:
-                        logger.error(f"An error occurred during file upload: {e}")
+                        logger.error(f"ファイルアップロード中にエラーが発生しました: {e}")
 
         global_step += 1
         if pbar is not None:
@@ -1291,7 +1284,7 @@ def train_and_evaluate(
     gc.collect()
     torch.cuda.empty_cache()
     if pbar is None and rank == 0:
-        logger.info(f"====> Epoch: {epoch}, step: {global_step}")
+        logger.info(f"====> エポック終了: {epoch}, ステップ: {global_step}")
 
 
 def evaluate(hps, generator, eval_loader, writer_eval):
@@ -1299,7 +1292,7 @@ def evaluate(hps, generator, eval_loader, writer_eval):
     image_dict = {}
     audio_dict = {}
     print()
-    logger.info("Evaluating ...")
+    logger.info("評価中... ")
     with torch.no_grad():
         for batch_idx, (
             x,
